@@ -13,7 +13,6 @@ jobs:
       matrix:
         include:
           - { target: rb3gen2, distro-release: "2026", distro-channel: next }
-          - { target: rb3gen2, distro-release: "2024", distro-channel: next }
     uses: avocado-linux/actions/.github/workflows/extension-test.yml@v1
     with:
       target:         ${{ matrix.target }}
