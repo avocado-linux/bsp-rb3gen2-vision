@@ -13,7 +13,7 @@ extensions:
       version: "*"
 
   avocado-bsp-rb3gen2-vision:
-    version: 0.1.0
+    version: 0.5.0
     release: r0
     types:
       - sysext
@@ -49,6 +49,23 @@ extensions:
       # to get its clocks.
       kernel-module-camcc-sc7280: '*'
 
+      # --- The bus the sensor sits on ------------------------------------
+      # CCI is the SoC's dedicated camera-control I2C controller, and the
+      # overlay puts the sensor at cci1_i2c1 -- so without this driver there
+      # is no I2C bus for the sensor to be probed on, and the camera cannot
+      # appear no matter what else is installed.
+      #
+      # Easy to miss because everything else looks healthy without it: camss
+      # probes, camcc loads with 48 users, /dev/video0-16 and /dev/media0 are
+      # all created, and the sensor node is present in the device tree with
+      # compatible = "sony,imx577". The only symptom is
+      #
+      #   /sys/bus/platform/devices/ac4b000.cci -> UNBOUND
+      #
+      # and no sensor subdev. Found on hardware after the device tree was
+      # finally reaching the board.
+      kernel-module-i2c-qcom-cci: '*'
+
       # --- The sensor ----------------------------------------------------
       # The Vision Mezzanine's camera is a Sony IMX577, declared in the
       # overlay as `compatible = "sony,imx577"`. There is no imx577 module:
@@ -81,6 +98,19 @@ extensions:
       media-ctl: '*'
       v4l-utils: '*'
 
+      # Pulls the kernel headers the overlay below is compiled against into the
+      # target-dev sysroot. Referencing a compile section is what makes avocado
+      # provision that sysroot at all (need_target_dev), and the packages the
+      # section declares are what land in it.
+      #
+      # It resolves against the project's `kernel.version`, so the bindings
+      # match the kernel the USER chose -- which is the point. The overlay
+      # #includes dt-bindings/clock/qcom,camcc-sc7280.h, and compiling it
+      # against a different kernel's constants would succeed and then bind the
+      # wrong clocks.
+      avocado-bsp-rb3gen2-vision-dt:
+        compile: rb3gen2-vision-dt
+
     # Load order matters: the V4L2 core and the clock controller must be up
     # before camss probes, and camss before the sensor is useful.
     modprobe:
@@ -99,34 +129,51 @@ extensions:
     #
     # overlays/qcs6490-rb3gen2-vision-mezzanine.dtso is upstream meta-qcom's,
     # carried verbatim. It sets `&camss status = "okay"`, `&cci1 status =
-    # "okay"`, and declares the imx577 on cci1_i2c1. Without it the base DTB
-    # describes no camss and no sensor, and the packages above have nothing to
-    # bind to -- verified on hardware: no camss node, no /dev/video*, no
-    # /dev/media*.
+    # "okay"`, and declares the imx577 on cci1_i2c1. Without it the base tree
+    # describes no camera: the CAMSS node (isp@acb3000, "qcom,sc7280-camss")
+    # is present but disabled, and there is no sensor -- so the modules above
+    # load with nothing to bind to, and there is no /dev/video* or /dev/media*.
     #
-    # DELIBERATELY NOT DECLARED YET, for the same two reasons as
-    # bsp-excc-q911's carrier overlay:
+    # Declaring it here rather than in the machine is what makes the mezzanine
+    # composable. avocado-cli collects the overlays of every extension enabled
+    # on the runtime, compiles them, and hands them to the BSP's
+    # device-tree-overlay-deliver hook; on this platform that hook claims them
+    # and avocado-build-qcom merges them into the tree embedded in the UKI. So
+    # a core kit -- which does not install this extension -- gets a tree with
+    # no camss and no phantom sensor, and installing this extension changes the
+    # device tree through the ordinary A/B OTA path, because the UKI is an
+    # os_artifact.
     #
-    #   1. Declaring device_tree_overlays pulls in avocado-dtc-overlay-deliver,
-    #      which this feed does not carry for this target -- `avocado install`
-    #      fails with "No match for argument: avocado-dtc-overlay-deliver".
-    #   2. Even with delivery, the Qualcomm flow flashes ONE dtb to dtb_a and
-    #      has no overlay-application step, so it would have no effect.
+    # Board-level overlays stay in the machine: kodiak-el2 and
+    # qcs6490-rb3gen2-staging are true of every RB3 Gen 2 whatever is fitted.
     #
-    # The .dtso is kept because it is the real description of the mezzanine,
-    # and because the merge is already proven: `fdtoverlay -i
-    # qcs6490-rb3gen2.dtb -o merged.dtb qcs6490-rb3gen2-vision-mezzanine.dtbo`
-    # applies cleanly against this build's base DTB (+765 bytes). What is
-    # missing is a flow that does that merge and flashes the result.
-    #
-    # Re-enable once overlay delivery AND application both exist here.
-    #
-    # device_tree_overlays:
-    #   - name: qcs6490-rb3gen2-vision-mezzanine
-    #     src: overlays/qcs6490-rb3gen2-vision-mezzanine.dtso
+    # No `params`: those are a boot-argument concept (config.txt
+    # `dtoverlay=name,k=v`, u-boot overlay entries), and an overlay merged into
+    # a static tree has nowhere to receive them. The qcom delivery hook rejects
+    # them rather than accepting a declaration that reads as configured and
+    # does nothing.
+    device_tree_overlays:
+      - name: qcs6490-rb3gen2-vision-mezzanine
+        src: overlays/qcs6490-rb3gen2-vision-mezzanine.dtso
 
 sdk:
   image: docker.io/avocadolinux/sdk:{{ env.AVOCADO_DISTRO_RELEASE }}
+
+  compile:
+    # Headers only -- there is nothing to compile here.
+    #
+    # The section exists because `sdk.compile.<name>.packages` is how an
+    # extension contributes to the target-dev sysroot, and kernel-devsrc is
+    # where the kernel's include/dt-bindings live. avocado-dtc-overlay finds
+    # them there when it preprocesses the overlay; it deliberately ships no
+    # headers of its own, since which kernel to compile against is the
+    # project's choice and not a property of the tool.
+    #
+    # Same mechanism ext-kmod-v4l2loopback uses to build a module against the
+    # pinned kernel.
+    rb3gen2-vision-dt:
+      packages:
+        kernel-devsrc: '*'
 
   # mkfs.erofs, which `avocado ext image` shells out to. Not in the SDK
   # bootstrap, and an extension declaring no sdk.packages gets bootstrap only.

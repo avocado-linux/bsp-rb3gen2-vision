@@ -46,42 +46,35 @@ The overlay declares `compatible = "sony,imx577"`, so `kernel-module-imx412` is
 the right package. Checked against this build's kernel source, not inferred from
 the package name.
 
-## This does not work yet, and the reason is not in this extension
+## How the device tree reaches the board
 
-Verified on hardware, on a board running this BSP:
+The base tree describes no camera: the CAMSS node is present but disabled
+(`isp@acb3000`, `compatible = "qcom,sc7280-camss"`) and there is no sensor. So
+the packages above would load with nothing to bind to, and there would be no
+`/dev/video*` or `/dev/media*`.
 
-```
-# ls -d /proc/device-tree/soc@0/camss*   ->  no such node
-# ls /dev/video* /dev/media*             ->  no such file
-```
+What enables them is `overlays/qcs6490-rb3gen2-vision-mezzanine.dtso` (upstream
+meta-qcom's, carried verbatim), declared here as a `device_tree_overlays` entry.
+The path from that declaration to the board:
 
-The base `qcs6490-rb3gen2.dtb` describes no CAMSS and no sensor. What enables
-them is `overlays/qcs6490-rb3gen2-vision-mezzanine.dtso` (upstream meta-qcom's,
-carried verbatim), which sets `&camss` and `&cci1` to `okay` and declares the
-IMX577 on `cci1_i2c1`.
+1. avocado-cli collects the overlays of **every extension enabled on the
+   runtime** and compiles each with `avocado-dtc-overlay`.
+2. It calls the BSP's `device-tree-overlay-deliver` hook, which on this
+   platform validates and claims them. Any overlay left unclaimed fails the
+   build — a declaration cannot silently ship nothing.
+3. `avocado-build-qcom` merges the claimed overlays into the device tree it
+   embeds in the UKI, which sd-stub installs over the firmware's.
 
-That overlay is **shipped here but not applied**, for two reasons, both outside
-this extension:
+**This is why the mezzanine is composable.** The tree is a function of the
+installed extension set: a core kit does not install this extension and gets no
+camss and no phantom IMX577. Board-level overlays stay in the machine —
+`kodiak-el2` and `qcs6490-rb3gen2-staging` are true of every RB3 Gen 2 whatever
+is fitted.
 
-1. Declaring `device_tree_overlays:` pulls in `avocado-dtc-overlay-deliver`,
-   which this feed does not carry for this target — `avocado install` fails with
-   `No match for argument: avocado-dtc-overlay-deliver`.
-2. Even with delivery, the Qualcomm flow flashes ONE dtb to `dtb_a` and has no
-   overlay-application step.
-
-The same gap blocks the EXCC-Q911 carrier overlay, so it is a flow-level
-problem, not a board-level one.
-
-The merge itself is already proven against this build's real base DTB:
-
-```sh
-fdtoverlay -i qcs6490-rb3gen2.dtb -o merged.dtb \
-           qcs6490-rb3gen2-vision-mezzanine.dtbo    # applies, +765 bytes
-```
-
-So closing this needs a flow that performs that merge and flashes the result —
-`fdtoverlay` at build time, or teaching the deploy recipe to emit a FIT. Until
-then, the packages here install and the modules load, with nothing to bind to.
+It is also OTA-updatable. The UKI is an `os_artifact` that stone already A/Bs as
+`file:efi:EFI/Linux/avocado-{a,b}+3.efi`, so installing this extension and
+redeploying changes the device tree through the ordinary update path, with boot
+counting and rollback.
 
 ## What is NOT attempted
 
