@@ -29,8 +29,8 @@ extensions:
     # The core kit is a separate extension on purpose.
     #
     # The RB3 Gen 2 ships as a core kit plus one of several mezzanines, and the
-    # mezzanine is what varies between products. Same split as the EXMP-Q911,
-    # where the module is the MACHINE and the EXCC carrier is an extension:
+    # mezzanine is what varies between products. Same split many SoM-plus-carrier
+    # products use: the module is the machine and the carrier is an extension --
     # anything that is a property of the removable board belongs here, not in
     # the machine conf, or every product needs its own machine.
     #
