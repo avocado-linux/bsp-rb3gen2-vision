@@ -1,0 +1,181 @@
+default_target: rb3gen2
+supported_targets:
+  - rb3gen2
+
+extensions:
+  # The core-kit BSP this layers on. Declared with a package source so the
+  # resolver knows to fetch it from the target's extension feed; a bare
+  # `depends_on` name that is not defined here fails with "not defined in
+  # `extensions:` and could not be resolved from the target's feed".
+  avocado-bsp-rb3gen2:
+    source:
+      type: package
+      version: "*"
+
+  avocado-bsp-rb3gen2-vision:
+    version: 0.5.0
+    release: r0
+    types:
+      - sysext
+      - confext
+    summary: "RB3 Gen 2 Vision Mezzanine — CAMSS ISP and the IMX577 sensor"
+    description: >
+      Board support for the camera mezzanine of the Qualcomm Robotics RB3 Gen 2
+      Vision Kit. Layers on top of avocado-bsp-rb3gen2, which covers the core
+      kit; this extension adds only what the mezzanine itself brings.
+    vendor: "Avocado Linux"
+    license: "MIT"
+
+    # The core kit is a separate extension on purpose.
+    #
+    # The RB3 Gen 2 ships as a core kit plus one of several mezzanines, and the
+    # mezzanine is what varies between products. Same split as the EXMP-Q911,
+    # where the module is the MACHINE and the EXCC carrier is an extension:
+    # anything that is a property of the removable board belongs here, not in
+    # the machine conf, or every product needs its own machine.
+    #
+    # So this extension holds the camera stack and nothing else. Ethernet,
+    # wifi, and the QPS615 are core-kit parts and live in avocado-bsp-rb3gen2.
+    depends_on:
+      - avocado-bsp-rb3gen2
+
+    packages:
+      # --- CAMSS, the SoC's camera subsystem -----------------------------
+      # The ISP itself. Present on every sc7280/QCS6490, but nothing enables
+      # it without a sensor to feed it, which is why it is here and not in the
+      # core-kit extension.
+      kernel-module-qcom-camss: '*'
+      # CAMSS's own clock controller. Without it camss probes and then fails
+      # to get its clocks.
+      kernel-module-camcc-sc7280: '*'
+
+      # --- The bus the sensor sits on ------------------------------------
+      # CCI is the SoC's dedicated camera-control I2C controller, and the
+      # overlay puts the sensor at cci1_i2c1 -- so without this driver there
+      # is no I2C bus for the sensor to be probed on, and the camera cannot
+      # appear no matter what else is installed.
+      #
+      # Easy to miss because everything else looks healthy without it: camss
+      # probes, camcc loads with 48 users, /dev/video0-16 and /dev/media0 are
+      # all created, and the sensor node is present in the device tree with
+      # compatible = "sony,imx577". The only symptom is
+      #
+      #   /sys/bus/platform/devices/ac4b000.cci -> UNBOUND
+      #
+      # and no sensor subdev. Found on hardware after the device tree was
+      # finally reaching the board.
+      kernel-module-i2c-qcom-cci: '*'
+
+      # --- The sensor ----------------------------------------------------
+      # The Vision Mezzanine's camera is a Sony IMX577, declared in the
+      # overlay as `compatible = "sony,imx577"`. There is no imx577 module:
+      # the in-tree imx412 driver claims both parts --
+      #
+      #   drivers/media/i2c/imx412.c:
+      #     { .compatible = "sony,imx412", .data = "imx412" },
+      #     { .compatible = "sony,imx577", .data = "imx577" },
+      #
+      # -- so imx412 IS the IMX577 driver. Checked in the kernel source for
+      # this build, not assumed from the name.
+      kernel-module-imx412: '*'
+
+      # --- V4L2 core -----------------------------------------------------
+      # What camss and the sensor bind against, and what creates /dev/video*
+      # and /dev/media*. Modular in this kernel, so each one is named.
+      kernel-module-videodev: '*'
+      kernel-module-mc: '*'
+      kernel-module-v4l2-fwnode: '*'
+      kernel-module-v4l2-async: '*'
+      kernel-module-v4l2-mem2mem: '*'
+      kernel-module-videobuf2-common: '*'
+      kernel-module-videobuf2-v4l2: '*'
+      kernel-module-videobuf2-memops: '*'
+      kernel-module-videobuf2-dma-sg: '*'
+
+      # --- Userspace -----------------------------------------------------
+      # media-ctl is how you inspect and link the camss pipeline; v4l-utils
+      # brings v4l2-ctl. Both are the minimum for proving a sensor streams.
+      media-ctl: '*'
+      v4l-utils: '*'
+
+      # Pulls the kernel headers the overlay below is compiled against into the
+      # target-dev sysroot. Referencing a compile section is what makes avocado
+      # provision that sysroot at all (need_target_dev), and the packages the
+      # section declares are what land in it.
+      #
+      # It resolves against the project's `kernel.version`, so the bindings
+      # match the kernel the USER chose -- which is the point. The overlay
+      # #includes dt-bindings/clock/qcom,camcc-sc7280.h, and compiling it
+      # against a different kernel's constants would succeed and then bind the
+      # wrong clocks.
+      avocado-bsp-rb3gen2-vision-dt:
+        compile: rb3gen2-vision-dt
+
+    # Load order matters: the V4L2 core and the clock controller must be up
+    # before camss probes, and camss before the sensor is useful.
+    modprobe:
+      - videodev
+      - videobuf2_dma_sg
+      - camcc_sc7280
+      - qcom_camss
+      - imx412
+
+    on_merge:
+      - udevadm control --reload
+      - udevadm trigger --type=subsystems --action=add --settle
+      - udevadm trigger --type=devices --action=add --settle
+
+    # The mezzanine's device tree.
+    #
+    # overlays/qcs6490-rb3gen2-vision-mezzanine.dtso is upstream meta-qcom's,
+    # carried verbatim. It sets `&camss status = "okay"`, `&cci1 status =
+    # "okay"`, and declares the imx577 on cci1_i2c1. Without it the base tree
+    # describes no camera: the CAMSS node (isp@acb3000, "qcom,sc7280-camss")
+    # is present but disabled, and there is no sensor -- so the modules above
+    # load with nothing to bind to, and there is no /dev/video* or /dev/media*.
+    #
+    # Declaring it here rather than in the machine is what makes the mezzanine
+    # composable. avocado-cli collects the overlays of every extension enabled
+    # on the runtime, compiles them, and hands them to the BSP's
+    # device-tree-overlay-deliver hook; on this platform that hook claims them
+    # and avocado-build-qcom merges them into the tree embedded in the UKI. So
+    # a core kit -- which does not install this extension -- gets a tree with
+    # no camss and no phantom sensor, and installing this extension changes the
+    # device tree through the ordinary A/B OTA path, because the UKI is an
+    # os_artifact.
+    #
+    # Board-level overlays stay in the machine: kodiak-el2 and
+    # qcs6490-rb3gen2-staging are true of every RB3 Gen 2 whatever is fitted.
+    #
+    # No `params`: those are a boot-argument concept (config.txt
+    # `dtoverlay=name,k=v`, u-boot overlay entries), and an overlay merged into
+    # a static tree has nowhere to receive them. The qcom delivery hook rejects
+    # them rather than accepting a declaration that reads as configured and
+    # does nothing.
+    device_tree_overlays:
+      - name: qcs6490-rb3gen2-vision-mezzanine
+        src: overlays/qcs6490-rb3gen2-vision-mezzanine.dtso
+
+sdk:
+  image: docker.io/avocadolinux/sdk:{{ env.AVOCADO_DISTRO_RELEASE }}
+
+  compile:
+    # Headers only -- there is nothing to compile here.
+    #
+    # The section exists because `sdk.compile.<name>.packages` is how an
+    # extension contributes to the target-dev sysroot, and kernel-devsrc is
+    # where the kernel's include/dt-bindings live. avocado-dtc-overlay finds
+    # them there when it preprocesses the overlay; it deliberately ships no
+    # headers of its own, since which kernel to compile against is the
+    # project's choice and not a property of the tool.
+    #
+    # Same mechanism ext-kmod-v4l2loopback uses to build a module against the
+    # pinned kernel.
+    rb3gen2-vision-dt:
+      packages:
+        kernel-devsrc: '*'
+
+  # mkfs.erofs, which `avocado ext image` shells out to. Not in the SDK
+  # bootstrap, and an extension declaring no sdk.packages gets bootstrap only.
+  packages:
+    nativesdk-erofs-utils: "*"
